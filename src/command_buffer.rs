@@ -121,7 +121,7 @@ impl CommandBuffer {
     }
 
     /// Queue an arbitrary operation to be run on a [`World`]
-    pub fn queue(&mut self, f: impl FnOnce(&mut World) + Send + Sync + 'static) {
+    pub fn queue(&mut self, f: impl FnOnce(&mut World) + 'static) {
         self.cmds.push(Cmd::Run(Box::new(f)));
     }
 
@@ -199,9 +199,6 @@ impl CommandBuffer {
         self.cmds.clear();
     }
 }
-
-unsafe impl Send for CommandBuffer {}
-unsafe impl Sync for CommandBuffer {}
 
 impl Drop for CommandBuffer {
     fn drop(&mut self) {
@@ -297,7 +294,7 @@ enum Cmd {
     SpawnOrInsert(EntityIndex),
     Remove(RemovedComps),
     Despawn(Entity),
-    Run(Box<dyn FnOnce(&mut World) + Send + Sync + 'static>),
+    Run(Box<dyn FnOnce(&mut World) + 'static>),
 }
 
 #[cfg(test)]

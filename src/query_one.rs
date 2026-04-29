@@ -100,6 +100,3 @@ impl<Q: Query> Drop for QueryOne<'_, Q> {
         }
     }
 }
-
-unsafe impl<Q: Query> Send for QueryOne<'_, Q> {}
-unsafe impl<Q: Query> Sync for QueryOne<'_, Q> {}

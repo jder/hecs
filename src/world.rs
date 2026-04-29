@@ -5,7 +5,6 @@ use core::convert::TryFrom;
 use core::error::Error;
 use core::hash::{BuildHasherDefault, Hasher};
 use core::{fmt, ptr};
-use spin::Mutex;
 
 use hashbrown::hash_map::{Entry, HashMap};
 
@@ -57,13 +56,12 @@ pub struct World {
 impl World {
     /// Create an empty world
     pub fn new() -> Self {
-        // AtomicU64 is unsupported on 32-bit MIPS and PPC architectures
-        // For compatibility, use Mutex<u64>
-        static ID: Mutex<u64> = Mutex::new(1);
-        let id = {
-            let mut id = ID.lock();
-            let next = id.checked_add(1).unwrap();
-            *id = next;
+        static mut ID: u64 = 1;
+        let id = unsafe {
+            // This crate is single-threaded by contract. The global ID only distinguishes
+            // worlds used sequentially by prepared query caches.
+            let next = ID.checked_add(1).unwrap();
+            ID = next;
             next
         };
         Self {
@@ -88,7 +86,7 @@ impl World {
     /// statically known. To spawn an entity with only one component, use a one-element tuple like
     /// `(x,)`.
     ///
-    /// Any type that satisfies `Send + Sync + 'static` can be used as a component.
+    /// Any `'static` type can be used as a component.
     ///
     /// # Example
     /// ```
@@ -276,21 +274,20 @@ impl World {
         }
     }
 
-    /// Allocate many entities ID concurrently
+    /// Allocate many entity IDs without immediately allocating storage
     ///
-    /// Unlike [`spawn`](Self::spawn), this can be called concurrently with other operations on the
-    /// [`World`] such as queries, but does not immediately create the entities. Reserved entities
-    /// are not visible to queries or world iteration, but can be otherwise operated on
-    /// freely. Operations that add or remove components or entities, such as `insert` or `despawn`,
-    /// will cause all outstanding reserved entities to become real entities before proceeding. This
-    /// can also be done explicitly by calling [`flush`](Self::flush).
+    /// Unlike [`spawn`](Self::spawn), this does not immediately create the entities. Reserved
+    /// entities are not visible to queries or world iteration, but can be otherwise operated on
+    /// freely. Operations that add or remove components or entities, such as `insert` or
+    /// `despawn`, will cause all outstanding reserved entities to become real entities before
+    /// proceeding. This can also be done explicitly by calling [`flush`](Self::flush).
     ///
     /// Useful for reserving an ID that will later have components attached to it with `insert`.
     pub fn reserve_entities(&self, count: u32) -> ReserveEntitiesIterator<'_> {
         self.entities.reserve_entities(count)
     }
 
-    /// Allocate an entity ID concurrently
+    /// Allocate an entity ID without immediately allocating storage
     ///
     /// See [`reserve_entities`](Self::reserve_entities).
     pub fn reserve_entity(&self) -> Entity {
@@ -352,7 +349,7 @@ impl World {
     /// Efficiently iterate over all entities that have certain components, using dynamic borrow
     /// checking
     ///
-    /// Prefer [`query_mut`](Self::query_mut) when concurrent access to the [`World`] is not required.
+    /// Prefer [`query_mut`](Self::query_mut) when a unique borrow of the [`World`] is available.
     ///
     /// Calling `iter` on the returned value yields values of type `Q`, where `Q` is some query
     /// type. A query type is any type which implements [`Query`], e.g. `Entity`, `&T`, `&mut T`, a
@@ -441,8 +438,8 @@ impl World {
 
     /// Prepare a query against a single entity, using dynamic borrow checking
     ///
-    /// Prefer [`query_one_mut`](Self::query_one_mut) when concurrent access to the [`World`] is not
-    /// required.
+    /// Prefer [`query_one_mut`](Self::query_one_mut) when a unique borrow of the [`World`] is
+    /// available.
     ///
     /// Call [`get`](QueryOne::get) on the resulting [`QueryOne`] to actually execute the query. The
     /// [`QueryOne`] value is responsible for releasing the dynamically-checked borrow made by
@@ -874,7 +871,7 @@ impl World {
 
     /// Inspect the archetypes that entities are organized into
     ///
-    /// Useful for dynamically scheduling concurrent queries by checking borrows in advance, and for
+    /// Useful for dynamically scheduling checked queries by checking borrows in advance, and for
     /// efficient serialization.
     #[inline(always)]
     pub fn archetypes(&self) -> impl ExactSizeIterator<Item = &'_ Archetype> + '_ {
@@ -902,8 +899,8 @@ impl World {
     ///
     /// Store the current value after deriving information from [`archetypes`](Self::archetypes),
     /// then check whether the value returned by this function differs before attempting an
-    /// operation that relies on its correctness. Useful for determining whether e.g. a concurrent
-    /// query execution plan is still correct.
+    /// operation that relies on its correctness. Useful for determining whether e.g. a cached query
+    /// execution plan is still correct.
     ///
     /// The generation may be, but is not necessarily, changed as a result of adding or removing any
     /// entity or component.
@@ -958,9 +955,6 @@ impl World {
         self.entities.set_freelist(freelist);
     }
 }
-
-unsafe impl Send for World {}
-unsafe impl Sync for World {}
 
 impl Default for World {
     fn default() -> Self {
@@ -1044,12 +1038,12 @@ impl From<NoSuchEntity> for QueryOneError {
     }
 }
 
-/// Types that can be components, implemented automatically for all `Send + Sync + 'static` types
+/// Types that can be components, implemented automatically for all `'static` types
 ///
-/// This is just a convenient shorthand for `Send + Sync + 'static`, and never needs to be
+/// This is just a convenient shorthand for `'static`, and never needs to be
 /// implemented manually.
-pub trait Component: Send + Sync + 'static {}
-impl<T: Send + Sync + 'static> Component for T {}
+pub trait Component: 'static {}
+impl<T: 'static> Component for T {}
 
 /// Iterator over all of a world's entities
 pub struct Iter<'a> {
@@ -1069,9 +1063,6 @@ impl<'a> Iter<'a> {
         }
     }
 }
-
-unsafe impl Send for Iter<'_> {}
-unsafe impl Sync for Iter<'_> {}
 
 impl<'a> Iterator for Iter<'a> {
     type Item = EntityRef<'a>;

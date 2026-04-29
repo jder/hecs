@@ -1,11 +1,11 @@
 use alloc::vec::Vec;
+use core::cell::Cell;
 use core::cmp;
 use core::convert::TryFrom;
 use core::error::Error;
 use core::iter::ExactSizeIterator;
 use core::num::{NonZeroU32, NonZeroU64};
 use core::ops::Range;
-use core::sync::atomic::{AtomicIsize, Ordering};
 use core::{fmt, mem};
 
 /// Lightweight unique ID, or handle, of an entity
@@ -174,7 +174,7 @@ pub(crate) struct Entities {
     //          free_cursor   pending.len()
     // ```
     //
-    // As IDs are allocated, `free_cursor` is atomically decremented, moving
+    // As IDs are allocated, `free_cursor` is decremented, moving
     // items from the freelist into the reserved list by sliding over the boundary.
     //
     // Once the freelist runs out, `free_cursor` starts going negative.
@@ -182,26 +182,25 @@ pub(crate) struct Entities {
     // the end of `meta.len()`.
     //
     // This formulation allows us to reserve any number of IDs first from the freelist
-    // and then from the new IDs, using only a single atomic subtract.
+    // and then from the new IDs, using only a single subtraction.
     //
     // Once `flush()` is done, `free_cursor` will equal `pending.len()`.
     pending: Vec<u32>,
-    free_cursor: AtomicIsize,
+    free_cursor: Cell<isize>,
     len: u32,
 }
 
 impl Entities {
-    /// Reserve entity IDs concurrently
+    /// Reserve entity IDs without immediately allocating storage for them
     ///
     /// Storage for entity generation and location is lazily allocated by calling `flush`.
     pub fn reserve_entities(&self, count: u32) -> ReserveEntitiesIterator<'_> {
-        // Use one atomic subtract to grab a range of new IDs. The range might be
+        // Use one subtract to grab a range of new IDs. The range might be
         // entirely nonnegative, meaning all IDs come from the freelist, or entirely
         // negative, meaning they are all new IDs to allocate, or a mix of both.
-        let range_end = self
-            .free_cursor
-            .fetch_sub(count as isize, Ordering::Relaxed);
+        let range_end = self.free_cursor.get();
         let range_start = range_end - count as isize;
+        self.free_cursor.set(range_start);
 
         let freelist_range = range_start.max(0) as usize..range_end.max(0) as usize;
 
@@ -235,11 +234,12 @@ impl Entities {
         }
     }
 
-    /// Reserve one entity ID concurrently
+    /// Reserve one entity ID without immediately allocating storage for it
     ///
     /// Equivalent to `self.reserve_entities(1).next().unwrap()`, but more efficient.
     pub fn reserve_entity(&self) -> Entity {
-        let n = self.free_cursor.fetch_sub(1, Ordering::Relaxed);
+        let n = self.free_cursor.get();
+        self.free_cursor.set(n - 1);
         if n > 0 {
             // Allocate from the freelist.
             let id = self.pending[(n - 1) as usize];
@@ -277,7 +277,7 @@ impl Entities {
         self.len += 1;
         if let Some(id) = self.pending.pop() {
             let new_free_cursor = self.pending.len() as isize;
-            *self.free_cursor.get_mut() = new_free_cursor;
+            self.free_cursor.set(new_free_cursor);
             Entity {
                 generation: self.meta[id as usize].generation,
                 id,
@@ -345,7 +345,7 @@ impl Entities {
             // ID has never been used in this world before
             self.pending.extend((self.meta.len() as u32)..entity.id);
             let new_free_cursor = self.pending.len() as isize;
-            *self.free_cursor.get_mut() = new_free_cursor;
+            self.free_cursor.set(new_free_cursor);
             self.meta.resize(entity.id as usize + 1, EntityMeta::EMPTY);
             self.len += 1;
             None
@@ -353,7 +353,7 @@ impl Entities {
             // ID was previously in use, but is now free
             self.pending.swap_remove(index);
             let new_free_cursor = self.pending.len() as isize;
-            *self.free_cursor.get_mut() = new_free_cursor;
+            self.free_cursor.set(new_free_cursor);
             self.len += 1;
             None
         } else {
@@ -388,7 +388,7 @@ impl Entities {
         self.pending.push(entity.id);
 
         let new_free_cursor = self.pending.len() as isize;
-        *self.free_cursor.get_mut() = new_free_cursor;
+        self.free_cursor.set(new_free_cursor);
         self.len -= 1;
 
         Ok(loc)
@@ -398,7 +398,7 @@ impl Entities {
     pub fn reserve(&mut self, additional: u32) {
         self.verify_flushed();
 
-        let freelist_size = *self.free_cursor.get_mut();
+        let freelist_size = self.free_cursor.get();
         let shortfall = additional as isize - freelist_size;
         if shortfall > 0 {
             self.meta.reserve(shortfall as usize);
@@ -410,12 +410,12 @@ impl Entities {
             Some(meta) => {
                 meta.generation == entity.generation
                     && (meta.location.index != u32::MAX
-                        || self.pending[self.free_cursor.load(Ordering::Relaxed).max(0) as usize..]
+                        || self.pending[self.free_cursor.get().max(0) as usize..]
                             .contains(&entity.id))
             }
             None => {
                 // Check if this could have been obtained from `reserve_entity`
-                let free = self.free_cursor.load(Ordering::Relaxed);
+                let free = self.free_cursor.get();
                 entity.generation.get() == 1
                     && free < 0
                     && (entity.id as isize) < (free.abs() + self.meta.len() as isize)
@@ -426,7 +426,7 @@ impl Entities {
     pub fn clear(&mut self) {
         self.meta.clear();
         self.pending.clear();
-        *self.free_cursor.get_mut() = 0;
+        self.free_cursor.set(0);
         self.len = 0;
     }
 
@@ -446,7 +446,7 @@ impl Entities {
     pub fn get(&self, entity: Entity) -> Result<Location, NoSuchEntity> {
         if self.meta.len() <= entity.id as usize {
             // Check if this could have been obtained from `reserve_entity`
-            let free = self.free_cursor.load(Ordering::Relaxed);
+            let free = self.free_cursor.get();
             if entity.generation.get() == 1
                 && free < 0
                 && (entity.id as isize) < (free.abs() + self.meta.len() as isize)
@@ -481,7 +481,7 @@ impl Entities {
             }
         } else {
             // See if it's pending, but not yet flushed.
-            let free_cursor = self.free_cursor.load(Ordering::Relaxed);
+            let free_cursor = self.free_cursor.get();
             let num_pending = cmp::max(-free_cursor, 0) as usize;
 
             if meta_len + num_pending > id as usize {
@@ -497,13 +497,13 @@ impl Entities {
     }
 
     fn needs_flush(&mut self) -> bool {
-        *self.free_cursor.get_mut() != self.pending.len() as isize
+        self.free_cursor.get() != self.pending.len() as isize
     }
 
     /// Allocates space for entities previously reserved with `reserve_entity` or
     /// `reserve_entities`, then initializes each one using the supplied function.
     pub fn flush(&mut self, mut init: impl FnMut(u32, &mut Location)) {
-        let free_cursor = *self.free_cursor.get_mut();
+        let free_cursor = self.free_cursor.get();
 
         let new_free_cursor = if free_cursor >= 0 {
             free_cursor as usize
@@ -517,7 +517,7 @@ impl Entities {
                 init(id as u32, &mut meta.location);
             }
 
-            *self.free_cursor.get_mut() = 0;
+            self.free_cursor.set(0);
             0
         };
 
@@ -533,7 +533,7 @@ impl Entities {
     }
 
     pub fn freelist(&self) -> impl ExactSizeIterator<Item = Entity> + '_ {
-        let free = self.free_cursor.load(Ordering::Relaxed);
+        let free = self.free_cursor.get();
         let ids = match usize::try_from(free) {
             Err(_) => &[],
             Ok(free) => &self.pending[0..free],
@@ -568,7 +568,7 @@ impl Entities {
             self.pending.push(entity.id);
             self.meta[entity.id as usize].generation = entity.generation;
         }
-        self.free_cursor = AtomicIsize::new(freelist.len() as isize);
+        self.free_cursor = Cell::new(freelist.len() as isize);
     }
 }
 
@@ -798,7 +798,7 @@ mod tests {
         for entity in v1.drain(6..) {
             e.free(entity).unwrap();
         }
-        assert_eq!(*e.free_cursor.get_mut(), 4);
+        assert_eq!(e.free_cursor.get(), 4);
 
         // Reserve 10 entities, so 4 will come from the freelist.
         // This means we will have allocated 10 + 10 - 4 total items, so max id is 15.
@@ -817,7 +817,7 @@ mod tests {
         }
 
         // 6 will come from pending.
-        assert_eq!(*e.free_cursor.get_mut(), -6);
+        assert_eq!(e.free_cursor.get(), -6);
 
         let mut flushed = Vec::new();
         e.flush(|id, loc| {

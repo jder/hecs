@@ -92,17 +92,8 @@ fn gen_bundle_impl(
             ids
         }
     };
-    let with_static_ids_body = if generics.params.is_empty() {
-        quote! {
-            static ELEMENTS: ::hecs::spin::lazy::Lazy<[::core::any::TypeId; #num_tys]> = ::hecs::spin::lazy::Lazy::new(|| {
-                #with_static_ids_inner
-            });
-            f(&*ELEMENTS)
-        }
-    } else {
-        quote! {
-            f(&#with_static_ids_inner)
-        }
+    let with_static_ids_body = quote! {
+        f(&#with_static_ids_inner)
     };
     quote! {
         unsafe impl #impl_generics ::hecs::Bundle for #ident #ty_generics #where_clause {

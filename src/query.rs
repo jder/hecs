@@ -1,11 +1,13 @@
 #[cfg(feature = "std")]
+use crate::alloc::rc::Rc;
+#[cfg(feature = "std")]
 use core::any::Any;
 use core::any::TypeId;
+#[cfg(feature = "std")]
+use core::cell::RefCell;
 use core::marker::PhantomData;
 use core::ptr::NonNull;
 use core::slice::Iter as SliceIter;
-#[cfg(feature = "std")]
-use std::sync::{Arc, RwLock};
 
 use crate::alloc::boxed::Box;
 #[cfg(feature = "std")]
@@ -51,7 +53,7 @@ pub unsafe trait QueryShared {}
 pub unsafe trait Fetch: Clone + Sized + 'static {
     /// The type of the data which can be cached to speed up retrieving
     /// the relevant type states from a matching [`Archetype`]
-    type State: Copy + Send + Sync;
+    type State: Copy;
 
     /// A value on which `get` may never be called
     fn dangling() -> Self;
@@ -687,7 +689,7 @@ impl<'w, Q: Query> QueryBorrow<'w, Q> {
 
     /// Like `iter`, but returns child iterators of at most `batch_size` elements
     ///
-    /// Useful for distributing work over a threadpool.
+    /// Useful for breaking work into smaller chunks.
     // The lifetime narrowing here is required for soundness.
     pub fn iter_batched(&mut self, batch_size: u32) -> BatchedIter<'_, Q> {
         let cache = self.borrow().clone();
@@ -766,9 +768,6 @@ impl<'w, Q: Query> QueryBorrow<'w, Q> {
     }
 }
 
-unsafe impl<Q: Query> Send for QueryBorrow<'_, Q> where for<'a> Q::Item<'a>: Send {}
-unsafe impl<Q: Query> Sync for QueryBorrow<'_, Q> where for<'a> Q::Item<'a>: Send {}
-
 impl<Q: Query> Drop for QueryBorrow<'_, Q> {
     fn drop(&mut self) {
         if let Some(cache) = &self.cache {
@@ -807,9 +806,6 @@ impl<'q, Q: Query> QueryIter<'q, Q> {
         }
     }
 }
-
-unsafe impl<Q: Query> Send for QueryIter<'_, Q> where for<'a> Q::Item<'a>: Send {}
-unsafe impl<Q: Query> Sync for QueryIter<'_, Q> where for<'a> Q::Item<'a>: Send {}
 
 impl<'q, Q: Query> Iterator for QueryIter<'q, Q> {
     type Item = Q::Item<'q>;
@@ -921,7 +917,7 @@ impl<'q, Q: Query> QueryMut<'q, Q> {
 
     /// Like `into_iter`, but returns child iterators of at most `batch_size` elements
     ///
-    /// Useful for distributing work over a threadpool.
+    /// Useful for breaking work into smaller chunks.
     pub fn into_iter_batched(self, batch_size: u32) -> BatchedIter<'q, Q> {
         let cache = CachedQuery::get(self.world);
         unsafe {
@@ -1037,9 +1033,6 @@ impl<'q, Q: Query> BatchedIter<'q, Q> {
     }
 }
 
-unsafe impl<Q: Query> Send for BatchedIter<'_, Q> where for<'a> Q::Item<'a>: Send {}
-unsafe impl<Q: Query> Sync for BatchedIter<'_, Q> where for<'a> Q::Item<'a>: Send {}
-
 impl<'q, Q: Query> Iterator for BatchedIter<'q, Q> {
     type Item = Batch<'q, Q>;
 
@@ -1087,9 +1080,6 @@ impl<'q, Q: Query> Iterator for Batch<'q, Q> {
         unsafe { self.state.next(self.meta) }
     }
 }
-
-unsafe impl<Q: Query> Send for Batch<'_, Q> where for<'a> Q::Item<'a>: Send {}
-unsafe impl<Q: Query> Sync for Batch<'_, Q> where for<'a> Q::Item<'a>: Send {}
 
 macro_rules! tuple_impl {
     ($($name: ident),*) => {
@@ -1328,9 +1318,6 @@ impl<'q, Q: Query> PreparedQueryIter<'q, Q> {
     }
 }
 
-unsafe impl<Q: Query> Send for PreparedQueryIter<'_, Q> where for<'a> Q::Item<'a>: Send {}
-unsafe impl<Q: Query> Sync for PreparedQueryIter<'_, Q> where for<'a> Q::Item<'a>: Send {}
-
 impl<'q, Q: Query> Iterator for PreparedQueryIter<'q, Q> {
     type Item = Q::Item<'q>;
 
@@ -1377,9 +1364,6 @@ pub struct View<'q, Q: Query> {
     archetypes: &'q [Archetype],
     fetch: Box<[Option<Q::Fetch>]>,
 }
-
-unsafe impl<Q: Query> Send for View<'_, Q> where for<'a> Q::Item<'a>: Send {}
-unsafe impl<Q: Query> Sync for View<'_, Q> where for<'a> Q::Item<'a>: Send {}
 
 impl<'q, Q: Query> View<'q, Q> {
     /// # Safety
@@ -1558,9 +1542,6 @@ pub struct PreparedView<'q, Q: Query> {
     archetypes: &'q [Archetype],
     fetch: &'q mut [Option<Q::Fetch>],
 }
-
-unsafe impl<Q: Query> Send for PreparedView<'_, Q> where for<'a> Q::Item<'a>: Send {}
-unsafe impl<Q: Query> Sync for PreparedView<'_, Q> where for<'a> Q::Item<'a>: Send {}
 
 impl<'q, Q: Query> PreparedView<'q, Q> {
     /// # Safety
@@ -1841,7 +1822,7 @@ pub(crate) fn assert_distinct<const N: usize>(entities: &[Entity; N]) {
 }
 
 #[cfg(feature = "std")]
-pub(crate) type QueryCache = RwLock<TypeIdMap<Arc<dyn Any + Send + Sync>>>;
+pub(crate) type QueryCache = RefCell<TypeIdMap<Rc<dyn Any>>>;
 
 #[cfg(feature = "std")]
 struct CachedQueryInner<F: Fetch> {
@@ -1867,7 +1848,7 @@ impl<F: Fetch> CachedQueryInner<F> {
 
 pub(crate) struct CachedQuery<F: Fetch> {
     #[cfg(feature = "std")]
-    inner: Arc<CachedQueryInner<F>>,
+    inner: Rc<CachedQueryInner<F>>,
     #[cfg(not(feature = "std"))]
     _marker: PhantomData<F>,
 }
@@ -1878,28 +1859,27 @@ impl<F: Fetch> CachedQuery<F> {
         {
             let existing_cache = world
                 .query_cache()
-                .read()
-                .unwrap()
+                .borrow()
                 .get(&TypeId::of::<F>())
-                .map(|x| Arc::downcast::<CachedQueryInner<F>>(x.clone()).unwrap())
+                .map(|x| Rc::downcast::<CachedQueryInner<F>>(x.clone()).unwrap())
                 .filter(|x| x.archetypes_generation == world.archetypes_generation());
             let inner = existing_cache.unwrap_or_else(
                 #[cold]
                 || {
-                    let mut cache = world.query_cache().write().unwrap();
+                    let mut cache = world.query_cache().borrow_mut();
                     let entry = cache.entry(TypeId::of::<F>());
                     let cached = match entry {
                         hash_map::Entry::Vacant(e) => {
-                            let fresh = Arc::new(CachedQueryInner::<F>::new(world));
+                            let fresh = Rc::new(CachedQueryInner::<F>::new(world));
                             e.insert(fresh.clone());
                             fresh
                         }
                         hash_map::Entry::Occupied(mut e) => {
                             let value =
-                                Arc::downcast::<CachedQueryInner<F>>(e.get().clone()).unwrap();
+                                Rc::downcast::<CachedQueryInner<F>>(e.get().clone()).unwrap();
                             match value.archetypes_generation == world.archetypes_generation() {
                                 false => {
-                                    let fresh = Arc::new(CachedQueryInner::<F>::new(world));
+                                    let fresh = Rc::new(CachedQueryInner::<F>::new(world));
                                     e.insert(fresh.clone());
                                     fresh
                                 }

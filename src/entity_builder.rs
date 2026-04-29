@@ -375,9 +375,6 @@ impl<M> Common<M> {
     }
 }
 
-unsafe impl<M> Send for Common<M> {}
-unsafe impl<M> Sync for Common<M> {}
-
 impl<M> Drop for Common<M> {
     fn drop(&mut self) {
         // Ensure buffered components aren't leaked

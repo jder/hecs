@@ -1,10 +1,10 @@
 use crate::alloc::collections::BinaryHeap;
 use core::{
     any::{type_name, TypeId},
+    cell::Cell,
     fmt,
     mem::MaybeUninit,
     slice,
-    sync::atomic::{AtomicU32, Ordering},
 };
 
 use crate::{
@@ -41,10 +41,7 @@ impl ColumnBatchType {
         assert!(size < u32::MAX);
         let mut types = self.types.into_sorted_vec();
         types.dedup();
-        let fill = types
-            .iter()
-            .map(|ty| (ty.id(), AtomicU32::new(0)))
-            .collect();
+        let fill = types.iter().map(|ty| (ty.id(), Cell::new(0))).collect();
         let mut arch = Archetype::new(types);
         arch.reserve(size);
         ColumnBatchBuilder {
@@ -58,13 +55,10 @@ impl ColumnBatchType {
 /// An incomplete collection of component data for entities with the same component types
 pub struct ColumnBatchBuilder {
     /// Number of components written so far for each component type
-    fill: TypeIdMap<AtomicU32>,
+    fill: TypeIdMap<Cell<u32>>,
     target_fill: u32,
     pub(crate) archetype: Option<Archetype>,
 }
-
-unsafe impl Send for ColumnBatchBuilder {}
-unsafe impl Sync for ColumnBatchBuilder {}
 
 impl ColumnBatchBuilder {
     /// Create a batch for *exactly* `size` entities with certain component types
@@ -78,7 +72,7 @@ impl ColumnBatchBuilder {
         let state = archetype.get_state::<T>()?;
         let base = unsafe { archetype.get_base::<T>(state) };
         let fill_storage = self.fill.get(&TypeId::of::<T>()).unwrap();
-        let fill = fill_storage.swap(u32::MAX, Ordering::Acquire);
+        let fill = fill_storage.replace(u32::MAX);
         if fill == u32::MAX {
             panic!("another {} writer still exists", type_name::<T>());
         }
@@ -99,7 +93,7 @@ impl ColumnBatchBuilder {
         if archetype
             .types()
             .iter()
-            .any(|ty| *self.fill.get_mut(&ty.id()).unwrap().get_mut() != self.target_fill)
+            .any(|ty| self.fill.get(&ty.id()).unwrap().get() != self.target_fill)
         {
             return Err(BatchIncomplete { _opaque: () });
         }
@@ -114,7 +108,7 @@ impl Drop for ColumnBatchBuilder {
     fn drop(&mut self) {
         if let Some(archetype) = self.archetype.take() {
             for ty in archetype.types() {
-                let fill = *self.fill.get_mut(&ty.id()).unwrap().get_mut();
+                let fill = self.fill.get(&ty.id()).unwrap().get();
                 unsafe {
                     let base = archetype.get_dynamic(ty.id(), 0, 0).unwrap();
                     for i in 0..fill {
@@ -131,7 +125,7 @@ pub struct ColumnBatch(pub(crate) Archetype);
 
 /// Handle for appending components
 pub struct BatchWriter<'a, T> {
-    fill_storage: &'a AtomicU32,
+    fill_storage: &'a Cell<u32>,
     fill: u32,
     storage: core::slice::IterMut<'a, MaybeUninit<T>>,
 }
@@ -160,7 +154,7 @@ impl<T> Drop for BatchWriter<'_, T> {
         // Release any reference to component storage before permitting another writer to be built
         // for this type
         self.storage = core::slice::IterMut::default();
-        self.fill_storage.store(self.fill, Ordering::Release);
+        self.fill_storage.set(self.fill);
     }
 }
 
@@ -208,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_writers() {
+    fn disjoint_writers() {
         let mut types = ColumnBatchType::new();
         types.add::<usize>();
         types.add::<u32>();

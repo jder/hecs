@@ -10,6 +10,9 @@
 //! - a small dependency closure
 //! - exclusion of externally-implementable functionality
 //!
+//! This fork is single-threaded by contract. Worlds, queries, and related handles must not be used
+//! from multiple threads, and component types only need to be `'static`.
+//!
 //! ```
 //! # use hecs::*;
 //! let mut world = World::new();
@@ -38,8 +41,6 @@ mod readme_doctest {}
 
 #[doc(hidden)]
 pub extern crate alloc;
-#[doc(hidden)]
-pub extern crate spin;
 
 macro_rules! reverse_apply {
     ($m: ident [] $($reversed:tt)*) => {

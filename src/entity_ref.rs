@@ -112,9 +112,6 @@ impl<'a> EntityRef<'a> {
     }
 }
 
-unsafe impl Send for EntityRef<'_> {}
-unsafe impl Sync for EntityRef<'_> {}
-
 /// Shared borrow of an entity's component
 pub struct Ref<'a, T: ?Sized> {
     borrow: ComponentBorrow<'a>,
@@ -135,9 +132,6 @@ impl<'a, T: Component> Ref<'a, T> {
         })
     }
 }
-
-unsafe impl<T: ?Sized + Sync> Send for Ref<'_, T> {}
-unsafe impl<T: ?Sized + Sync> Sync for Ref<'_, T> {}
 
 impl<'a, T: ?Sized> Ref<'a, T> {
     /// Transform the `Ref<'_, T>` to point to a part of the borrowed data, e.g.
@@ -222,9 +216,6 @@ impl<'a, T: Component> RefMut<'a, T> {
         })
     }
 }
-
-unsafe impl<T: ?Sized + Send> Send for RefMut<'_, T> {}
-unsafe impl<T: ?Sized + Sync> Sync for RefMut<'_, T> {}
 
 impl<'a, T: ?Sized> RefMut<'a, T> {
     /// Transform the `RefMut<'_, T>` to point to a part of the borrowed data, e.g.

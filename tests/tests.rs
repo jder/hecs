@@ -1,6 +1,8 @@
 #![allow(deprecated)]
 
 use std::borrow::Cow;
+use std::cell::Cell;
+use std::rc::Rc;
 
 use hecs::*;
 
@@ -15,6 +17,17 @@ fn random_access() {
     assert_eq!(*world.get::<&i32>(f).unwrap(), 456);
     *world.get::<&mut i32>(f).unwrap() = 42;
     assert_eq!(*world.get::<&i32>(f).unwrap(), 42);
+}
+
+#[test]
+fn non_send_sync_components() {
+    let shared = Rc::new(Cell::new(7));
+    let mut world = World::new();
+    let entity = world.spawn((shared.clone(),));
+
+    world.get::<&Rc<Cell<i32>>>(entity).unwrap().set(9);
+
+    assert_eq!(shared.get(), 9);
 }
 
 #[test]

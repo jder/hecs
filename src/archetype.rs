@@ -9,7 +9,7 @@ use core::ptr::{self, NonNull};
 
 use hashbrown::HashMap;
 
-use crate::borrow::AtomicBorrow;
+use crate::borrow::BorrowState;
 use crate::query::Fetch;
 use crate::{Access, Component, ComponentRef, Query};
 
@@ -58,7 +58,7 @@ impl Archetype {
             len: 0,
             data: (0..component_count)
                 .map(|_| Data {
-                    state: AtomicBorrow::new(),
+                    state: BorrowState::new(),
                     storage: NonNull::new(max_align as *mut u8).unwrap(),
                 })
                 .collect(),
@@ -289,7 +289,7 @@ impl Archetype {
                     }
                 };
                 Data {
-                    state: AtomicBorrow::new(), // &mut self guarantees no outstanding borrows
+                    state: BorrowState::new(), // &mut self guarantees no outstanding borrows
                     storage,
                 }
             })
@@ -441,7 +441,7 @@ impl Drop for Archetype {
 }
 
 struct Data {
-    state: AtomicBorrow,
+    state: BorrowState,
     storage: NonNull<u8>,
 }
 
